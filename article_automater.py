@@ -13,7 +13,7 @@ from webdriver_manager.chrome import ChromeDriverManager
 
 READING_TIME_SECONDS = 1
 
-class AuthenticatedStudyAccelerator:
+class ArticleAutomater:
     def __init__(self, cookies_file):
         self.cookies_file = cookies_file
         self.driver = None
@@ -65,6 +65,12 @@ class AuthenticatedStudyAccelerator:
             print(f"Cookie error: {e}")
             return False
 
+    def save_cookies(self):
+        cookies = self.driver.get_cookies()
+        with open(self.cookies_file, 'w') as f:
+            json.dump(cookies, f, indent=2)
+        print(f"Cookies saved to {self.cookies_file}")
+
     def test_authentication(self):
         try:
             self.driver.get("https://www.geeksforgeeks.org/batch/dsa-jiit")
@@ -72,17 +78,27 @@ class AuthenticatedStudyAccelerator:
 
             page_text = self.driver.page_source.lower()
             if "login" in page_text or "sign in" in page_text:
-                print("Auth failed")
+                print("Authentication failed - cookies may be expired")
                 return False
             else:
-                print("Auth success")
+                print("Authentication successful")
                 return True
 
         except Exception as e:
             print(f"Auth test error: {e}")
             return False
 
-    def speed_read_article(self, url):
+    def refresh_authentication(self):
+        """Handle re-authentication when cookies are invalid"""
+        print("Please log in manually in the browser window...")
+        input("Press Enter after logging in to save new cookies...")
+
+        self.save_cookies()
+        print("New cookies saved!")
+
+        return self.test_authentication()
+
+    def load_article(self, url):
         print(f"Loading: {url}")
         self.driver.get(url)
 
@@ -102,102 +118,13 @@ class AuthenticatedStudyAccelerator:
             title = "Unknown"
             print("Title not found")
 
-        speed_script = """
-        var controlPanel = document.createElement('div');
-        controlPanel.id = 'speed-read-controls';
-        controlPanel.style.cssText = `
-            position: fixed; top: 10px; right: 10px; z-index: 9999;
-            background: rgba(0,0,0,0.9); color: white; padding: 15px;
-            border-radius: 8px; font-family: Arial, sans-serif; font-size: 14px;
-            box-shadow: 0 2px 10px rgba(0,0,0,0.3);
-        `;
-        controlPanel.innerHTML = `
-            <div style="margin-bottom: 10px; font-weight: bold;">Speed Reading</div>
-            <div>Ctrl+S: Toggle mode</div>
-            <div>↑/↓: Navigate paragraphs</div>
-            <div>Space: Scroll down</div>
-            <div>Para: <span id="para-counter">1</span></div>
-        `;
-        document.body.appendChild(controlPanel);
-
-        let currentPara = 0;
-        let paragraphs = document.querySelectorAll('p');
-        let speedMode = false;
-
-        paragraphs = Array.from(paragraphs).filter(p => {
-            const text = p.textContent.trim();
-            return text.length > 20 && !text.includes('©') && !text.includes('Terms');
-        });
-
-        function updateDisplay() {
-            document.getElementById('para-counter').textContent = currentPara + 1;
-        }
-
-        function highlightParagraph(index) {
-            paragraphs.forEach(p => {
-                p.style.backgroundColor = '';
-                p.style.padding = '';
-                p.style.borderRadius = '';
-            });
-
-            if (index >= 0 && index < paragraphs.length) {
-                paragraphs[index].scrollIntoView({behavior: 'smooth', block: 'center'});
-                if (speedMode) {
-                    paragraphs[index].style.backgroundColor = '#ffff99';
-                    paragraphs[index].style.padding = '10px';
-                    paragraphs[index].style.borderRadius = '5px';
-                }
-            }
-        }
-
-        document.addEventListener('keydown', function(e) {
-            if (e.ctrlKey && e.key === 's') {
-                e.preventDefault();
-                speedMode = !speedMode;
-
-                if (speedMode) {
-                    controlPanel.style.background = 'rgba(0,100,0,0.9)';
-                    highlightParagraph(currentPara);
-                } else {
-                    controlPanel.style.background = 'rgba(0,0,0,0.9)';
-                    paragraphs.forEach(p => {
-                        p.style.backgroundColor = '';
-                        p.style.padding = '';
-                        p.style.borderRadius = '';
-                    });
-                }
-            }
-
-            if (speedMode) {
-                if (e.key === 'ArrowDown' && currentPara < paragraphs.length - 1) {
-                    e.preventDefault();
-                    currentPara++;
-                    highlightParagraph(currentPara);
-                    updateDisplay();
-                } else if (e.key === 'ArrowUp' && currentPara > 0) {
-                    e.preventDefault();
-                    currentPara--;
-                    highlightParagraph(currentPara);
-                    updateDisplay();
-                } else if (e.key === ' ') {
-                    e.preventDefault();
-                    window.scrollBy(0, window.innerHeight * 0.8);
-                }
-            }
-        });
-
-        updateDisplay();
-        """
-
-        self.driver.execute_script(speed_script)
-        print("Speed reading ready")
+        print("Article loaded successfully")
         return True
 
     def study_articles_session(self, items_csv, completed_csv):
         articles = []
         completed_urls = set()
 
-        # Load completed articles
         if os.path.exists(completed_csv):
             with open(completed_csv, 'r', encoding='utf-8') as f:
                 reader = csv.DictReader(f)
@@ -211,7 +138,6 @@ class AuthenticatedStudyAccelerator:
                 if row.get('type') == 'article' and row.get('url'):
                     articles.append(row)
 
-        # Filter out already completed articles
         pending_articles = [article for article in articles if article['url'] not in completed_urls]
 
         print(f"Found {len(articles)} total articles")
@@ -230,14 +156,13 @@ class AuthenticatedStudyAccelerator:
 
             print(f"[{i}/{len(pending_articles)}] {title}")
 
-            success = self.speed_read_article(url)
+            success = self.load_article(url)
             if not success:
                 continue
 
             print(f"Reading for {READING_TIME_SECONDS}s...")
             time.sleep(READING_TIME_SECONDS)
 
-            # Try to mark as complete and track if successful
             marked_complete = self.mark_article_complete()
             if marked_complete:
                 self.add_to_completed(completed_csv, article)
@@ -323,15 +248,23 @@ def main():
         print("No module_items.csv")
         return
 
-    accelerator = AuthenticatedStudyAccelerator(cookies_file)
+    accelerator = ArticleAutomater(cookies_file)
 
-    print("Study Accelerator")
+    print("Article Automater Starting...")
 
     if accelerator.setup_driver(headless=True):
         if accelerator.test_authentication():
             accelerator.study_articles_session(items_csv, completed_csv)
         else:
-            print("Auth failed")
+            print("Authentication failed. Attempting to refresh cookies...")
+            accelerator.close()
+            accelerator.setup_driver(headless=False)
+            if accelerator.refresh_authentication():
+                accelerator.close()
+                accelerator.setup_driver(headless=True)
+                accelerator.study_articles_session(items_csv, completed_csv)
+            else:
+                print("Re-authentication failed")
     else:
         print("Setup failed")
 
