@@ -290,35 +290,40 @@ def scrape_module_items(driver, track_url, cookies_file='cookies.json'):
                     if expected_type:
                         item_data['type'] = expected_type
                     else:
-                        try:
-                            imgs = item.find_elements(By.TAG_NAME, 'img')
-                            type_determined = False
-                            for img in imgs:
-                                src = img.get_attribute('src') or ''
-                                if 'Article' in src or 'book-open' in src or 'Article_' in src:
-                                    item_data['type'] = 'article'
-                                    type_determined = True
-                                    break
-                                elif 'Group11' in src or 'youtube' in src or 'video' in src:
-                                    item_data['type'] = 'video'
-                                    type_determined = True
-                                    break
-
-                            if not type_determined:
-                                try:
-                                    meta_elem = item.find_element(By.CLASS_NAME, 'sidebar_meta__9J4r4')
-                                    meta_text = meta_elem.text.strip()
-                                    item_data['meta'] = meta_text
-                                    if 'Duration' in meta_text or 'min' in meta_text or 'sec' in meta_text:
+                        # Simple type detection based on URL patterns
+                        url = item_data.get('url', '')
+                        if '/video/' in url or 'video' in url.lower():
+                            item_data['type'] = 'video'
+                        elif '/article/' in url or 'article' in url.lower():
+                            item_data['type'] = 'article'
+                        else:
+                            # Try to detect from meta text or images as fallback
+                            try:
+                                imgs = item.find_elements(By.TAG_NAME, 'img')
+                                for img in imgs:
+                                    src = img.get_attribute('src') or ''
+                                    if 'video' in src.lower() or 'youtube' in src.lower():
                                         item_data['type'] = 'video'
-                                    elif 'Last Updated' in meta_text or any(char.isdigit() for char in meta_text if char in '0123456789-'):
+                                        break
+                                    elif 'article' in src.lower() or 'book' in src.lower():
                                         item_data['type'] = 'article'
-                                    else:
-                                        item_data['type'] = tab_name[:-1] if tab_name.endswith('s') else tab_name
-                                except:
-                                    item_data['type'] = tab_name[:-1] if tab_name.endswith('s') else tab_name
-                        except:
-                            item_data['type'] = tab_name[:-1] if tab_name.endswith('s') else tab_name
+                                        break
+
+                                if not item_data.get('type'):
+                                    try:
+                                        meta_elem = item.find_element(By.CLASS_NAME, 'sidebar_meta__9J4r4')
+                                        meta_text = meta_elem.text.strip()
+                                        item_data['meta'] = meta_text
+                                        if 'Duration' in meta_text or 'min' in meta_text or 'sec' in meta_text:
+                                            item_data['type'] = 'video'
+                                        elif 'Last Updated' in meta_text:
+                                            item_data['type'] = 'article'
+                                        else:
+                                            item_data['type'] = 'unknown'
+                                    except:
+                                        item_data['type'] = 'unknown'
+                            except:
+                                item_data['type'] = 'unknown'
 
                     if not item_data.get('meta'):
                         try:
@@ -362,7 +367,7 @@ def scrape_module_items(driver, track_url, cookies_file='cookies.json'):
                         item_data = {
                             'title': title,
                             'url': href,
-                            'type': 'article' if '/article/' in href else 'video' if '/video/' in href else 'unknown'
+                            'type': 'video' if '/video/' in href or 'video' in href.lower() else 'article' if '/article/' in href or 'article' in href.lower() else 'unknown'
                         }
                         items.append(item_data)
 
