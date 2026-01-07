@@ -2,6 +2,7 @@ import os
 import csv
 import time
 import json
+import threading
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.chrome.service import Service
@@ -379,6 +380,16 @@ def scrape_module_items(driver, track_url, cookies_file='cookies.json'):
 
     return items
 
+def load_tracks_from_csv(csv_file='course_tracks.csv'):
+    """Load tracks from existing CSV file"""
+    tracks = []
+    if os.path.exists(csv_file):
+        with open(csv_file, 'r', encoding='utf-8') as csvfile:
+            reader = csv.DictReader(csvfile)
+            for row in reader:
+                tracks.append(row)
+    return tracks
+
 def test_single_module(driver, track_url, cookies_file='cookies.json'):
     print(f"Testing module: {track_url}")
 
@@ -396,118 +407,180 @@ def test_single_module(driver, track_url, cookies_file='cookies.json'):
 
 def main():
     base_dir = os.path.dirname(os.path.abspath(__file__))
-    course_url = "https://www.geeksforgeeks.org/batch/dsa-jiit"
 
-    driver = setup_driver(headless=True)
+    # Load existing tracks from CSV
+    tracks_csv = os.path.join(base_dir, 'course_tracks.csv')
+    tracks = load_tracks_from_csv(tracks_csv)
 
-    if driver:
+    if not tracks:
+        print("No tracks found in course_tracks.csv. Please run track extraction first.")
+        return
+
+    print(f"Loaded {len(tracks)} tracks from CSV")
+
+    # Test with a single track first
+    test_driver = setup_driver(headless=True)
+    if test_driver:
         try:
             test_track_url = "https://www.geeksforgeeks.org/batch/dsa-jiit/track/Java-Foundation-Data-Types-2"
-            print("Testing module...")
-            test_items = test_single_module(driver, test_track_url, 'cookies.json')
+            print("Testing module scraping...")
+            test_items = test_single_module(test_driver, test_track_url, 'cookies.json')
 
             if not test_items:
-                print("Test failed")
-                return
+                print("Test failed - check cookies and authentication")
+                print("Continuing anyway...")
+            else:
+                print("Test passed, proceeding with parallel scraping...")
 
-            print("Test passed, scraping course...")
+        except Exception as e:
+            print(f"Test failed with error: {e}")
+            print("Continuing anyway...")
+        finally:
+            test_driver.quit()
+    else:
+        print("Failed to create test driver")
+        return
 
-            tracks = scrape_course_tracks(driver, course_url, 'cookies.json')
+    # Load existing items to avoid reprocessing
+    items_csv = os.path.join(base_dir, 'module_items.csv')
+    processed_track_titles = set()
+    existing_items_count = 0
 
-            tracks_csv = os.path.join(base_dir, 'course_tracks.csv')
-            with open(tracks_csv, 'w', newline='', encoding='utf-8') as csvfile:
-                fieldnames = ['title', 'url', 'videos', 'articles', 'problems', 'mcqs', 'category', 'tab']
-                writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
-                writer.writeheader()
-                for track in tracks:
-                    writer.writerow(track)
-
-            print(f"Tracks saved: {len(tracks)}")
-
-            all_items = []
-            for i, track in enumerate(tracks):
-                track_url = track['url']
-                if track_url:
-                    print(f"Processing track {i+1}/{len(tracks)}: {track['title']}")
-
-                    max_retries = 3
-                    items = []
-                    for attempt in range(max_retries):
+    if os.path.exists(items_csv):
+        try:
+            with open(items_csv, 'r', newline='', encoding='utf-8') as csvfile:
+                reader = csv.DictReader(csvfile)
+                for row in reader:
+                    if 'url' in row and row['url']:
+                        # Extract track name from item URL
+                        # URL format: /batch/dsa-jiit/track/TRACK-NAME/video/... or /article/...
                         try:
-                            items = scrape_module_items(driver, track_url, 'cookies.json')
-                            if items:
-                                break
-                            else:
-                                print(f"Attempt {attempt+1}: No items, retrying...")
-                        except Exception as e:
-                            print(f"Attempt {attempt+1} failed: {e}")
-                            if attempt < max_retries - 1:
-                                time.sleep(5)
-                            else:
-                                print(f"Failed after {max_retries} attempts")
+                            url_parts = row['url'].split('/')
+                            track_index = url_parts.index('track')
+                            if track_index < len(url_parts) - 1:
+                                track_name = url_parts[track_index + 1].split('/')[0]  # Remove any suffixes
+                                processed_track_titles.add(track_name)
+                        except (ValueError, IndexError):
+                            pass
+                        existing_items_count += 1
+            print(f"Found {existing_items_count} existing items from {len(processed_track_titles)} processed tracks")
+        except Exception as e:
+            print(f"Error reading existing CSV: {e}")
+            processed_track_titles = set()
 
-                    all_items.extend(items)
-                    print(f"Items in track: {len(items)}")
+    # Parallel processing with multiple threads
+    max_threads = 5  # Adjust based on system capabilities
+    lock = threading.Lock()
+    threads = []
+    completed_tracks = 0
 
-                    time.sleep(2)
+    def scrape_and_save(track, cookies_file):
+        nonlocal completed_tracks
+        track_url = track['url']
+        if not track_url:
+            return
 
-            items_csv = os.path.join(base_dir, 'module_items.csv')
-            with open(items_csv, 'w', newline='', encoding='utf-8') as csvfile:
-                fieldnames = ['type', 'title', 'url', 'meta']
-                writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
-                writer.writeheader()
-                for item in all_items:
-                    writer.writerow(item)
+        # Skip quiz, mock, and problems tracks
+        track_title_lower = track['title'].lower()
+        if ('quiz' in track_title_lower or 'quiz' in track_url.lower() or
+            'mock' in track_title_lower or 'mock' in track_url.lower() or
+            'problems' in track_title_lower or 'problems' in track_url.lower()):
+            print(f"Skipping quiz/mock/problems track: {track['title']}")
+            return
 
-            print(f"Total items: {len(all_items)}")
+        # Extract track name from URL
+        try:
+            url_parts = track_url.split('/')
+            track_index = url_parts.index('track')
+            if track_index < len(url_parts) - 1:
+                track_name = url_parts[track_index + 1].split('/')[0]  # Remove any suffixes
+            else:
+                track_name = track['title'].replace(' ', '-').lower()  # Fallback
+        except (ValueError, IndexError):
+            track_name = track['title'].replace(' ', '-').lower()  # Fallback
 
-            videos = [item for item in all_items if item['type'] == 'video']
-            articles = [item for item in all_items if item['type'] == 'article']
-            print(f"Videos: {len(videos)}, Articles: {len(articles)}")
+        # Check if already processed
+        if track_name in processed_track_titles:
+            print(f"Skipping already processed track: {track['title']}")
+            return
 
+        print(f"Processing track {completed_tracks + 1}: {track['title']}")
+
+        # Create driver for this thread
+        driver = setup_driver(headless=True)
+        if not driver:
+            print(f"Failed to create driver for {track['title']}")
+            return
+
+        try:
+            max_retries = 1  # Reduced from 3 to 1
+            items = []
+            for attempt in range(max_retries):
+                try:
+                    items = scrape_module_items(driver, track_url, cookies_file)
+                    if items:
+                        break
+                    else:
+                        print(f"Attempt {attempt+1}: No items found")
+                except Exception as e:
+                    print(f"Attempt {attempt+1} failed: {e}")
+                    if attempt < max_retries - 1:
+                        time.sleep(5)
+                    else:
+                        print(f"Failed after {max_retries} attempts")
+
+            if items:
+                # Immediately save to CSV
+                with lock:
+                    try:
+                        file_exists = os.path.exists(items_csv)
+                        with open(items_csv, 'a', newline='', encoding='utf-8') as csvfile:
+                            fieldnames = ['type', 'title', 'url', 'meta']
+                            writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+                            if not file_exists:
+                                writer.writeheader()
+                            for item in items:
+                                writer.writerow(item)
+                        processed_track_titles.add(track_name)
+                        completed_tracks += 1
+                        print(f"Saved {len(items)} items for track: {track['title']}")
+                    except Exception as e:
+                        print(f"Error saving items for {track['title']}: {e}")
         finally:
             driver.quit()
-    else:
-        print("Fallback to local files...")
-        from bs4 import BeautifulSoup
 
-        course_file = os.path.join(base_dir, 'Courcce.html')
-        if os.path.exists(course_file):
-            print("Parsing course from local file...")
-            tracks = parse_course_overview_local(course_file)
+    for i in range(0, len(tracks), max_threads):
+        batch = tracks[i:i + max_threads]
 
-            tracks_csv = os.path.join(base_dir, 'course_tracks.csv')
-            with open(tracks_csv, 'w', newline='', encoding='utf-8') as csvfile:
-                fieldnames = ['title', 'url', 'videos', 'articles', 'problems', 'mcqs', 'category', 'tab']
-                writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
-                writer.writeheader()
-                for track in tracks:
-                    writer.writerow(track)
+        # Start threads for this batch
+        for track in batch:
+            thread = threading.Thread(
+                target=scrape_and_save,
+                args=(track, 'cookies.json')
+            )
+            threads.append(thread)
+            thread.start()
 
-            print(f"Tracks from local: {len(tracks)}")
+        # Wait for all threads in this batch to complete
+        for thread in threads:
+            thread.join()
 
-        module_file = os.path.join(base_dir, 'Module.html')
-        if os.path.exists(module_file):
-            print("Parsing module from local file...")
-            items = parse_module_page_local(module_file)
+        threads = []  # Reset for next batch
 
-            if not items:
-                article_file = os.path.join(base_dir, 'Article.html')
-                if os.path.exists(article_file):
-                    print("Trying Article.html...")
-                    items = parse_module_page_local(article_file)
+        print(f"Completed batch {i//max_threads + 1}, total tracks processed: {completed_tracks}")
 
-            items_csv = os.path.join(base_dir, 'module_items.csv')
-            with open(items_csv, 'w', newline='', encoding='utf-8') as csvfile:
-                fieldnames = ['type', 'title', 'url', 'meta']
-                writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
-                writer.writeheader()
-                for item in items:
-                    writer.writerow(item)
+    print(f"Total new tracks processed: {completed_tracks}")
 
-            print(f"Items from local: {len(items)}")
-
-        print("For complete data, download ChromeDriver")
+    # Count final totals
+    try:
+        with open(items_csv, 'r', newline='', encoding='utf-8') as csvfile:
+            reader = csv.DictReader(csvfile)
+            all_items = list(reader)
+            videos = [item for item in all_items if item.get('type') == 'video']
+            articles = [item for item in all_items if item.get('type') == 'article']
+            print(f"Final totals - Videos: {len(videos)}, Articles: {len(articles)}, Total items: {len(all_items)}")
+    except Exception as e:
+        print(f"Error reading final CSV: {e}")
 
 def parse_course_overview_local(html_file):
     with open(html_file, 'r', encoding='utf-8') as f:
